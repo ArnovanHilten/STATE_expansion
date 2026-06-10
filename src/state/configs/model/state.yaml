@@ -48,6 +48,12 @@ kwargs:
       rotary_dim: 0
       use_rotary_embeddings: false
 
+  # QuantumCell cross-attention (interleaved with backbone self-attention layers)
+  use_qc_cross_attn: false
+  qc_emb_path: null        # path to gene_embeddings_combined.npz
+  qc_mode: per_source      # "per_source" (22 KV tokens, more expressive) or "combined" (1 KV token)
+  cross_attn_freq: 3       # insert one cross-attn block after every N self-attn layers
+
   lora:
       enable: false
       r: 16

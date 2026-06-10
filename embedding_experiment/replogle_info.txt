@@ -1,0 +1,12 @@
+on gefion the training data is in
+
+import scanpy as sc
+Replogle = sc.read_h5ad("/dcai/users/hilarn/55_cu_0055/data/perturbseq/gold/filtered/Replogle/emb_Replogle.h5ad")
+
+gives
+
+AnnData object with n_obs × n_vars = 643413 × 6642
+    obs: 'gem_group', 'gene', 'gene_id', 'transcript', 'gene_transcript', 'sgID_AB', 'mitopercent', 'UMI_count', 'z_gemgroup_UMI', 'cell_line'
+    var: 'highly_variable', 'means', 'dispersions', 'dispersions_norm'
+    uns: 'hvg'
+    obsm: 'X_hvg', 'X_hvg_replogle', 'X_state'

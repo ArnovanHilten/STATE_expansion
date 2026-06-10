@@ -55,6 +55,7 @@ class scGPTPerturbationDataset(PerturbationDataset):
         vocab: Optional[Dict[str, int]] = None,
         hvg_names_uns_key: Optional[str] = None,
         perturbation_type: Literal["chemical", "genetic"] = "chemical",
+        gene_to_qc_idx: Optional[Dict[str, int]] = None,
         **kwargs,
     ):
         """
@@ -109,6 +110,7 @@ class scGPTPerturbationDataset(PerturbationDataset):
             logger.warning(f"scGPTPerturbationDataset ([{self.name}]) Number of invalid genes: {num_invalid_genes}")
 
         self.perturbation_type = perturbation_type.lower()
+        self.gene_to_qc_idx = gene_to_qc_idx
 
         if self.perturbation_type == "genetic":
             num_genes_X = len(self.gene_names)
@@ -185,6 +187,11 @@ class scGPTPerturbationDataset(PerturbationDataset):
                 self.gene_ids, dtype=torch.long
             ),  # TODO: should be a more efficient way to do this as this is repeated for every cell
         }
+
+        if self.gene_to_qc_idx is not None:
+            sample["pert_gene_idx"] = torch.tensor(
+                self.gene_to_qc_idx.get(pert_name, -1), dtype=torch.long
+            )
 
         if "perturbation_type" in self.__dict__ and self.perturbation_type == "genetic":
             sample["pert_flags"] = torch.tensor(self.pert_flags[pert_name], dtype=torch.long)

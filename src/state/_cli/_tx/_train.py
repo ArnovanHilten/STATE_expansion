@@ -108,6 +108,15 @@ def run_tx_train(cfg: DictConfig):
     elif cfg["model"]["name"].lower() == "scvi":
         cfg["data"]["kwargs"]["transform"] = None
 
+    if cfg["model"]["kwargs"].get("use_qc_cross_attn") and cfg["model"]["kwargs"].get("qc_emb_path"):
+        import numpy as np
+        _qc = np.load(cfg["model"]["kwargs"]["qc_emb_path"], allow_pickle=True)
+        _gene_to_qc_idx: dict[str, int] = {str(g): i for i, g in enumerate(_qc["gene_ids"])}
+        if "gene_symbols" in _qc:
+            # Symbols take lower priority so ENSG IDs win on collision
+            _gene_to_qc_idx.update({str(s): i for i, s in enumerate(_qc["gene_symbols"]) if str(s) not in _gene_to_qc_idx})
+        cfg["data"]["kwargs"]["gene_to_qc_idx"] = _gene_to_qc_idx
+
     output_space = cfg["data"]["kwargs"].get("output_space", "gene")
     assert output_space in {"embedding", "gene", "all"}, (
         f"data.kwargs.output_space must be one of 'embedding', 'gene', or 'all'; got {output_space!r}"

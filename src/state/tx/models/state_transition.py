@@ -11,6 +11,7 @@ from geomloss import SamplesLoss
 from typing import Dict, Optional, Tuple
 
 from .base import PerturbationModel
+from .cross_attention import GeneEmbeddingCrossAttention, QuantumCellCrossAttentionLayer
 from .decoders import FinetuneVCICountsDecoder
 from .utils import build_mlp, get_activation_class, get_transformer_backbone, apply_lora
 
@@ -181,6 +182,12 @@ class StateTransitionPerturbationModel(PerturbationModel):
             raise ValueError(f"Unknown loss function: {loss_name}")
 
         self.use_basal_projection = kwargs.get("use_basal_projection", True)
+
+        # QuantumCell cross-attention kwargs must be set before _build_networks
+        self.use_qc_cross_attn = kwargs.get("use_qc_cross_attn", False)
+        self.qc_emb_path = kwargs.get("qc_emb_path", None)
+        self.qc_mode = kwargs.get("qc_mode", "per_source")
+        self.cross_attn_freq = int(kwargs.get("cross_attn_freq", 3))
 
         # Build the underlying neural OT network
         self._build_networks(lora_cfg=kwargs.get("lora", None))
@@ -385,6 +392,28 @@ class StateTransitionPerturbationModel(PerturbationModel):
                 nn.Linear(self.output_dim // 8, self.output_dim),
             )
 
+        # QuantumCell cross-attention layers (interleaved with transformer backbone)
+        self.qc_module: Optional[GeneEmbeddingCrossAttention] = None
+        self.cross_attn_layers: Optional[nn.ModuleList] = None
+        if self.use_qc_cross_attn:
+            if not self.qc_emb_path:
+                raise ValueError("use_qc_cross_attn=True requires qc_emb_path to be set.")
+            self.qc_module = GeneEmbeddingCrossAttention(
+                emb_path=self.qc_emb_path,
+                d_model=self.hidden_dim,
+                mode=self.qc_mode,
+            )
+            n_layers = self.transformer_backbone_kwargs.get("num_hidden_layers", 8)
+            nhead = self.transformer_backbone_kwargs.get("num_attention_heads", 12)
+            n_ca = n_layers // self.cross_attn_freq
+            self.cross_attn_layers = nn.ModuleList(
+                [QuantumCellCrossAttentionLayer(self.hidden_dim, nhead) for _ in range(n_ca)]
+            )
+            logger.info(
+                f"QuantumCell cross-attention enabled: mode={self.qc_mode}, "
+                f"cross_attn_freq={self.cross_attn_freq}, n_ca_layers={n_ca}"
+            )
+
     def encode_perturbation(self, pert: torch.Tensor) -> torch.Tensor:
         """If needed, define how we embed the raw perturbation input."""
         return self.pert_encoder(pert)
@@ -452,7 +481,49 @@ class StateTransitionPerturbationModel(PerturbationModel):
             seq_input = self.confidence_token.append_confidence_token(seq_input)
 
         # forward pass + extract CLS last hidden state
-        if self.hparams.get("mask_attn", False):
+        if self.use_qc_cross_attn and self.qc_module is not None and self.cross_attn_layers is not None:
+            # Resolve the perturbed gene index per cell set: (B*S,) → (B,)
+            raw_gene_idx = batch.get("pert_gene_idx")
+            if raw_gene_idx is not None:
+                if padded:
+                    gene_idx = raw_gene_idx.reshape(-1, self.cell_sentence_len)[:, 0]
+                else:
+                    gene_idx = raw_gene_idx.reshape(1, -1)[:, 0]
+            else:
+                # No gene index provided — use -1 (unknown) for all items in batch
+                batch_size_here = seq_input.shape[0]
+                gene_idx = seq_input.new_full((batch_size_here,), -1, dtype=torch.long)
+
+            # Lookup QuantumCell KV tokens: (B, N, d_model) and optional (B, N) mask
+            qc_kv, qc_mask = self.qc_module.lookup(gene_idx)
+
+            # Use forward hooks on each decoder layer to inject cross-attention after every
+            # cross_attn_freq layers. This lets LlamaBidirectionalModel handle all attention
+            # mask preparation internally while we intercept between layers.
+            hooks = []
+            cross_attn_layers = self.cross_attn_layers
+            cross_attn_freq = self.cross_attn_freq
+
+            def make_hook(layer_idx: int):
+                ca_slot = (layer_idx + 1) // cross_attn_freq - 1
+                applies = (layer_idx + 1) % cross_attn_freq == 0 and 0 <= ca_slot < len(cross_attn_layers)
+
+                def hook(module, input, output):  # noqa: ARG001
+                    if applies:
+                        return cross_attn_layers[ca_slot](output, qc_kv, key_padding_mask=qc_mask)
+
+                return hook
+
+            for i, layer in enumerate(self.transformer_backbone.layers):
+                hooks.append(layer.register_forward_hook(make_hook(i)))
+
+            try:
+                backbone_out = self.transformer_backbone(inputs_embeds=seq_input, is_causal=False)
+                transformer_output = backbone_out.last_hidden_state
+            finally:
+                for hook in hooks:
+                    hook.remove()
+        elif self.hparams.get("mask_attn", False):
             batch_size, seq_length, _ = seq_input.shape
             device = seq_input.device
             self.transformer_backbone._attn_implementation = "eager"  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
