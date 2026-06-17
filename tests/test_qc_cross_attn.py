@@ -41,6 +41,8 @@ def mock_npz(tmp_path: Path) -> str:
     source_names = np.array([f"src{i}" for i in range(N_SOURCES)])
     source_dims = np.array(SOURCE_DIMS, dtype=np.int32)
 
+    gene_symbols = np.array([f"GENE{i}" for i in range(N_GENES)])
+
     out = tmp_path / "gene_embeddings_combined.npz"
     np.savez_compressed(
         out,
@@ -48,6 +50,7 @@ def mock_npz(tmp_path: Path) -> str:
         mask_per_source=mask_per_source,
         mask_any=mask_any,
         gene_ids=gene_ids,
+        gene_symbols=gene_symbols,
         source_names=source_names,
         source_dims=source_dims,
     )
@@ -119,9 +122,12 @@ class TestGeneEmbeddingCrossAttentionPerSource:
         module = GeneEmbeddingCrossAttention(mock_npz, D_MODEL, mode="per_source")
         gene_idx = torch.tensor([7])  # absent from all sources
         kv, mask = module.lookup(gene_idx)
-        # Should not produce NaN — all-masked row is zeroed and mask is cleared
-        assert not torch.isnan(kv).any()
-        assert mask is None or not mask[0].all()
+        # KV is zeroed for fully-absent gene to save computation.
+        # The all-True mask is intentionally kept so the caller's nan_to_num → 0
+        # gives a pure residual pass-through without LayerNorm-bias leakage.
+        assert not torch.isnan(kv).any(), "KV should not contain NaN (zeroed)"
+        assert (kv[0] == 0).all(), "KV should be zeroed for fully-absent gene"
+        assert mask is not None and mask[0].all(), "All-True mask must be preserved"
 
     def test_projections_are_trainable(self, mock_npz):
         module = GeneEmbeddingCrossAttention(mock_npz, D_MODEL, mode="per_source")
@@ -246,11 +252,96 @@ def test_st_without_pert_gene_idx_fallback(mock_npz):
     batch = {
         "ctrl_cell_emb": torch.randn(B * S, 8),
         "pert_emb": torch.randn(B * S, 5),
-        # no pert_gene_idx
+        # no pert_gene_idx, no pert_name
     }
     with torch.no_grad():
         out = model(batch, padded=True)
     assert out.shape == (B * S, 8)
+
+
+def test_st_pert_name_stride_picks_correct_gene(mock_npz):
+    """Verify the [::cell_sentence_len] stride selects the right gene per cell-set.
+
+    The batch sampler lays out B*S cells as:
+        [gene_A]*S + [gene_B]*S + ...
+    so pert_names[::S] must yield exactly [gene_A, gene_B, ...].
+    We confirm this by monkey-patching qc_module.lookup to record what
+    gene_indices it receives, then asserting they match expectations.
+    """
+    model = _make_st_model(mock_npz)
+    model.eval()
+
+    S = 4  # cell_sentence_len matches _make_st_model default
+    # Two cell-sets: GENE2 repeated S times, then GENE5 repeated S times
+    pert_names = ["GENE2"] * S + ["GENE5"] * S
+
+    captured = {}
+    original_lookup = model.qc_module.lookup
+
+    def capturing_lookup(gene_indices):
+        captured["gene_indices"] = gene_indices.tolist()
+        return original_lookup(gene_indices)
+
+    model.qc_module.lookup = capturing_lookup
+
+    B = 2
+    batch = {
+        "ctrl_cell_emb": torch.randn(B * S, 8),
+        "pert_emb": torch.randn(B * S, 5),
+        "pert_name": pert_names,
+    }
+    with torch.no_grad():
+        model(batch, padded=True)
+
+    assert "gene_indices" in captured, "lookup was never called"
+    resolved = captured["gene_indices"]
+    assert len(resolved) == B, f"Expected {B} gene indices (one per cell-set), got {len(resolved)}"
+
+    expected_0 = model._gene_name_to_idx["GENE2"]
+    expected_1 = model._gene_name_to_idx["GENE5"]
+    assert resolved[0] == expected_0, f"Cell-set 0: expected idx {expected_0} (GENE2), got {resolved[0]}"
+    assert resolved[1] == expected_1, f"Cell-set 1: expected idx {expected_1} (GENE5), got {resolved[1]}"
+
+
+def test_st_pert_name_lookup(mock_npz):
+    """pert_name strings in the batch should resolve to the correct gene embeddings.
+
+    This is the primary code path in production: the external DataModule never
+    emits pert_gene_idx, but pert_name is always present.  The model builds
+    _gene_name_to_idx from the npz and looks up indices from the gene symbol.
+    """
+    model = _make_st_model(mock_npz)
+    model.eval()
+
+    # mock_npz has gene_symbols ["GENE0", ..., "GENE9"]
+    assert model._gene_name_to_idx is not None
+    assert "GENE0" in model._gene_name_to_idx
+    assert "GENE1" in model._gene_name_to_idx
+
+    B, S = 2, 4
+    # Each cell-set has S cells with the same pert_name (sampler repeats within a sentence)
+    batch = {
+        "ctrl_cell_emb": torch.randn(B * S, 8),
+        "pert_emb": torch.randn(B * S, 5),
+        "pert_name": ["GENE0"] * S + ["GENE3"] * S,  # B=2, S=4 each
+    }
+    with torch.no_grad():
+        out_named = model(batch, padded=True)
+    assert out_named.shape == (B * S, 8)
+
+    # The output should differ from a batch with unknown genes (-1), since
+    # known genes provide non-zero cross-attention KV.
+    batch_unknown = {
+        "ctrl_cell_emb": batch["ctrl_cell_emb"],
+        "pert_emb": batch["pert_emb"],
+        "pert_name": ["UNKNOWN_GENE"] * (B * S),
+    }
+    with torch.no_grad():
+        out_unknown = model(batch_unknown, padded=True)
+
+    assert not torch.allclose(out_named, out_unknown), (
+        "Known gene names should produce different output than unknown genes"
+    )
 
 
 def test_st_backward_compat_without_qc(mock_npz):

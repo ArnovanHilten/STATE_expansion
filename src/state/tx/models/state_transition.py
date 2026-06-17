@@ -395,6 +395,10 @@ class StateTransitionPerturbationModel(PerturbationModel):
         # QuantumCell cross-attention layers (interleaved with transformer backbone)
         self.qc_module: Optional[GeneEmbeddingCrossAttention] = None
         self.cross_attn_layers: Optional[nn.ModuleList] = None
+        # Mapping from gene symbol / ENSG ID → embedding row index.  Built from the
+        # same npz used by GeneEmbeddingCrossAttention so the model can resolve
+        # batch["pert_name"] strings without needing the dataset to emit pert_gene_idx.
+        self._gene_name_to_idx: Optional[dict] = None
         if self.use_qc_cross_attn:
             if not self.qc_emb_path:
                 raise ValueError("use_qc_cross_attn=True requires qc_emb_path to be set.")
@@ -409,9 +413,23 @@ class StateTransitionPerturbationModel(PerturbationModel):
             self.cross_attn_layers = nn.ModuleList(
                 [QuantumCellCrossAttentionLayer(self.hidden_dim, nhead) for _ in range(n_ca)]
             )
+            # Build gene-name → index lookup from the npz (ENSG IDs + gene symbols)
+            import numpy as _np
+            _data = _np.load(self.qc_emb_path, allow_pickle=True)
+            _mapping: dict = {}
+            if "gene_ids" in _data:
+                for _i, _g in enumerate(_data["gene_ids"]):
+                    _mapping[str(_g)] = _i
+            if "gene_symbols" in _data:
+                for _i, _s in enumerate(_data["gene_symbols"]):
+                    _key = str(_s)
+                    if _key not in _mapping:  # gene_ids take priority
+                        _mapping[_key] = _i
+            self._gene_name_to_idx = _mapping
             logger.info(
                 f"QuantumCell cross-attention enabled: mode={self.qc_mode}, "
-                f"cross_attn_freq={self.cross_attn_freq}, n_ca_layers={n_ca}"
+                f"cross_attn_freq={self.cross_attn_freq}, n_ca_layers={n_ca}, "
+                f"gene_name_to_idx size={len(_mapping)}"
             )
 
     def encode_perturbation(self, pert: torch.Tensor) -> torch.Tensor:
@@ -482,15 +500,27 @@ class StateTransitionPerturbationModel(PerturbationModel):
 
         # forward pass + extract CLS last hidden state
         if self.use_qc_cross_attn and self.qc_module is not None and self.cross_attn_layers is not None:
-            # Resolve the perturbed gene index per cell set: (B*S,) → (B,)
+            # Resolve the perturbed gene index per cell set → (B,) LongTensor.
+            # Prefer pert_name (always in batch) over pert_gene_idx (rarely emitted).
+            pert_names = batch.get("pert_name")  # list[str], one per cell-set row
             raw_gene_idx = batch.get("pert_gene_idx")
-            if raw_gene_idx is not None:
+            if pert_names is not None and self._gene_name_to_idx is not None:
+                # pert_name is repeated cell_sentence_len times when the batch is padded;
+                # take the first occurrence per cell-set to get one name per (B,).
+                if padded:
+                    # pert_names has length B*S — take every cell_sentence_len-th entry
+                    names_per_set = pert_names[:: self.cell_sentence_len]
+                else:
+                    names_per_set = pert_names[:1]
+                indices = [self._gene_name_to_idx.get(str(n), -1) for n in names_per_set]
+                gene_idx = torch.tensor(indices, dtype=torch.long, device=seq_input.device)
+            elif raw_gene_idx is not None:
                 if padded:
                     gene_idx = raw_gene_idx.reshape(-1, self.cell_sentence_len)[:, 0]
                 else:
                     gene_idx = raw_gene_idx.reshape(1, -1)[:, 0]
             else:
-                # No gene index provided — use -1 (unknown) for all items in batch
+                # No gene information available — use -1 (unknown) for all items
                 batch_size_here = seq_input.shape[0]
                 gene_idx = seq_input.new_full((batch_size_here,), -1, dtype=torch.long)
 

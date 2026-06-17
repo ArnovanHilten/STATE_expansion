@@ -41,6 +41,9 @@ class QuantumCellCrossAttentionLayer(nn.Module):
         x_n = self.norm_q(x)
         kv_n = self.norm_kv(kv)
         x_attn, _ = self.cross_attn(x_n, kv_n, kv_n, key_padding_mask=key_padding_mask)
+        # All-masked genes produce NaN (softmax over all-inf). Replace with 0 so the
+        # residual passes through unchanged — prevents LayerNorm-bias leakage.
+        x_attn = torch.nan_to_num(x_attn, nan=0.0)
         x = x_attn + residual
         x = self.ff(self.ff_norm(x)) + x
         return x
@@ -151,17 +154,15 @@ class GeneEmbeddingCrossAttention(nn.Module):
                 pad_mask_1d[unknown_mask] = True
             key_padding_mask = pad_mask_1d.unsqueeze(1) if pad_mask_1d.any() else None
 
-        # Zero out hidden state for fully-masked genes to avoid NaN in attention
+        # Zero out KV for fully-masked genes to save computation.
+        # Keep the all-True mask intact — the resulting NaN in the attention output
+        # is replaced with 0 in QuantumCellCrossAttentionLayer.forward, giving a
+        # pure residual pass-through without LayerNorm-bias leakage.
         if key_padding_mask is not None:
             all_masked = key_padding_mask.all(dim=-1)        # (B,) — every token is masked
             if all_masked.any():
                 kv = kv.clone()
                 kv[all_masked] = 0.0
-                # Use None mask for those genes so MHA doesn't produce NaN
-                # We keep the mask but zero the values; MHA with all-True mask returns NaN,
-                # so we set those rows' mask to False (attend to zeros) instead.
-                key_padding_mask = key_padding_mask.clone()
-                key_padding_mask[all_masked] = False
 
         kv = self.dropout(kv)
         return kv, key_padding_mask
