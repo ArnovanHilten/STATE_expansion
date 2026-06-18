@@ -1,3 +1,5 @@
 .DS_Store
 QuantumCell_embeddings/.DS_Store
 QuantumCell_embeddings/
+*.pyc
+*__pycache__*

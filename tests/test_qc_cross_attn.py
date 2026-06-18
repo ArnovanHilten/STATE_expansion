@@ -92,6 +92,29 @@ def test_cross_attn_layer_gradient_flows():
         assert p.grad is not None
 
 
+def test_cross_attn_layer_no_nan_grad_when_all_masked():
+    """All-masked rows must not produce NaN gradients (the original nan_to_num
+    approach zeroed the forward but left NaN in the backward pass)."""
+    layer = QuantumCellCrossAttentionLayer(D_MODEL, nhead=4)
+    B, S, N = 3, 8, N_SOURCES
+    x = torch.randn(B, S, D_MODEL, requires_grad=True)
+    kv = torch.zeros(B, N, D_MODEL)  # zeroed as GeneEmbeddingCrossAttention does
+
+    # Row 1 is fully masked (all sources absent)
+    mask = torch.zeros(B, N, dtype=torch.bool)
+    mask[1] = True
+
+    out = layer(x, kv, key_padding_mask=mask)
+    assert not torch.isnan(out).any(), "NaN in forward output"
+
+    out.sum().backward()
+    assert x.grad is not None
+    assert not torch.isnan(x.grad).any(), "NaN in input gradients"
+    for name, p in layer.named_parameters():
+        assert p.grad is not None
+        assert not torch.isnan(p.grad).any(), f"NaN gradient in {name}"
+
+
 # ---------------------------------------------------------------------------
 # GeneEmbeddingCrossAttention tests
 # ---------------------------------------------------------------------------
@@ -122,9 +145,8 @@ class TestGeneEmbeddingCrossAttentionPerSource:
         module = GeneEmbeddingCrossAttention(mock_npz, D_MODEL, mode="per_source")
         gene_idx = torch.tensor([7])  # absent from all sources
         kv, mask = module.lookup(gene_idx)
-        # KV is zeroed for fully-absent gene to save computation.
-        # The all-True mask is intentionally kept so the caller's nan_to_num → 0
-        # gives a pure residual pass-through without LayerNorm-bias leakage.
+        # KV is zeroed; the all-True mask is preserved so the cross-attention layer
+        # can detect this row and zero its output without NaN in forward or backward.
         assert not torch.isnan(kv).any(), "KV should not contain NaN (zeroed)"
         assert (kv[0] == 0).all(), "KV should be zeroed for fully-absent gene"
         assert mask is not None and mask[0].all(), "All-True mask must be preserved"

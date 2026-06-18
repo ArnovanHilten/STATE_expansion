@@ -40,10 +40,26 @@ class QuantumCellCrossAttentionLayer(nn.Module):
         residual = x
         x_n = self.norm_q(x)
         kv_n = self.norm_kv(kv)
-        x_attn, _ = self.cross_attn(x_n, kv_n, kv_n, key_padding_mask=key_padding_mask)
-        # All-masked genes produce NaN (softmax over all-inf). Replace with 0 so the
-        # residual passes through unchanged — prevents LayerNorm-bias leakage.
-        x_attn = torch.nan_to_num(x_attn, nan=0.0)
+
+        # When all KV tokens in a row are masked, softmax(-inf, ..., -inf) = NaN.
+        # nan_to_num fixes the forward but NaN gradients still flow in the backward.
+        # Instead: temporarily unmask slot 0 for those rows so softmax stays finite,
+        # then zero out their attention output so no signal leaks (KV is already
+        # zeroed by GeneEmbeddingCrossAttention.lookup for these rows).
+        null_rows: Optional[torch.Tensor] = None
+        safe_mask = key_padding_mask
+        if key_padding_mask is not None:
+            all_masked = key_padding_mask.all(dim=-1)  # (B,)
+            if all_masked.any():
+                safe_mask = key_padding_mask.clone()
+                safe_mask[all_masked, 0] = False       # unmask slot 0 → finite softmax
+                null_rows = all_masked
+
+        x_attn, _ = self.cross_attn(x_n, kv_n, kv_n, key_padding_mask=safe_mask)
+
+        if null_rows is not None:
+            x_attn = x_attn.masked_fill(null_rows[:, None, None], 0.0)
+
         x = x_attn + residual
         x = self.ff(self.ff_norm(x)) + x
         return x
