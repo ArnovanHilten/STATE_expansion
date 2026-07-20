@@ -30,6 +30,9 @@ class QuantumCellCrossAttentionLayer(nn.Module):
             nn.Linear(d_model * ff_mult, d_model),
             nn.Dropout(dropout),
         )
+        # Set to True externally to enable weight collection (eval only).
+        self._collect_attn_weights: bool = False
+        self._last_attn_weights: Optional[torch.Tensor] = None
 
     def forward(
         self,
@@ -55,10 +58,25 @@ class QuantumCellCrossAttentionLayer(nn.Module):
                 safe_mask[all_masked, 0] = False       # unmask slot 0 → finite softmax
                 null_rows = all_masked
 
-        x_attn, _ = self.cross_attn(x_n, kv_n, kv_n, key_padding_mask=safe_mask)
+        if not self.training and self._collect_attn_weights:
+            # need_weights=True disables flash-attn; only triggered when explicitly requested.
+            x_attn, attn_w = self.cross_attn(
+                x_n, kv_n, kv_n,
+                key_padding_mask=safe_mask,
+                need_weights=True,
+                average_attn_weights=True,  # average over heads → (B, S_q, N_kv)
+            )
+            self._last_attn_weights = attn_w.detach()  # (B, S_q, N_sources)
+        else:
+            x_attn, _ = self.cross_attn(x_n, kv_n, kv_n, key_padding_mask=safe_mask)
+            self._last_attn_weights = None
 
         if null_rows is not None:
             x_attn = x_attn.masked_fill(null_rows[:, None, None], 0.0)
+            if self._last_attn_weights is not None:
+                self._last_attn_weights = self._last_attn_weights.masked_fill(
+                    null_rows[:, None, None], 0.0
+                )
 
         x = x_attn + residual
         x = self.ff(self.ff_norm(x)) + x
