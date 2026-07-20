@@ -563,21 +563,22 @@ class StateTransitionPerturbationModel(PerturbationModel):
                     hook.remove()
 
             # Collect per-source attention weights (eval only).
-            # Each layer stores (B, S_q, N_sources); average over layers and cell positions
-            # to get (B, N_sources), then repeat to align with individual cells (B*S, N_sources).
+            # Each layer stores (B, S_q, N_sources). Average across layers, then
+            # reshape to (B*S_q, N_sources) so each cell row has its own weight vector.
+            # This works for both padded (B>1, S_q=cell_sentence_len) and unpadded
+            # (B=1, S_q=actual_n_cells) predict paths.
             self._last_qc_attn_weights = None
             if not self.training and self.cross_attn_layers is not None:
                 layer_weights = [
-                    layer._last_attn_weights.mean(dim=1)  # (B, N_sources)
+                    layer._last_attn_weights  # (B, S_q, N_sources)
                     for layer in self.cross_attn_layers
                     if layer._last_attn_weights is not None
                 ]
                 if layer_weights:
-                    w = torch.stack(layer_weights, dim=0).mean(dim=0)  # (B, N_sources)
-                    # Repeat so one weight row per cell aligns with predict_step outputs
-                    self._last_qc_attn_weights = w.repeat_interleave(
-                        self.cell_sentence_len, dim=0
-                    )  # (B*S, N_sources)
+                    # Average across layers, then flatten B and S_q into one dim
+                    w = torch.stack(layer_weights, dim=0).mean(dim=0)  # (B, S_q, N_sources)
+                    B, S_q, N = w.shape
+                    self._last_qc_attn_weights = w.reshape(B * S_q, N)  # (B*S_q, N_sources)
         elif self.hparams.get("mask_attn", False):
             batch_size, seq_length, _ = seq_input.shape
             device = seq_input.device
