@@ -240,6 +240,8 @@ class StateTransitionPerturbationModel(PerturbationModel):
             self.batch_classifier = None
         # Internal cache for last token features (B, S, H) from transformer for aux loss
         self._token_features: Optional[torch.Tensor] = None
+        # Populated during eval when use_qc_cross_attn=True: (B*S, N_sources)
+        self._last_qc_attn_weights: Optional[torch.Tensor] = None
 
         # if the model is outputting to counts space, apply relu
         # otherwise its in embedding space and we don't want to
@@ -432,6 +434,12 @@ class StateTransitionPerturbationModel(PerturbationModel):
                 f"gene_name_to_idx size={len(_mapping)}"
             )
 
+    def enable_attn_weight_collection(self, enable: bool = True) -> None:
+        """Toggle per-source attention weight collection for all cross-attention layers."""
+        if self.cross_attn_layers is not None:
+            for layer in self.cross_attn_layers:
+                layer._collect_attn_weights = enable
+
     def encode_perturbation(self, pert: torch.Tensor) -> torch.Tensor:
         """If needed, define how we embed the raw perturbation input."""
         return self.pert_encoder(pert)
@@ -553,6 +561,23 @@ class StateTransitionPerturbationModel(PerturbationModel):
             finally:
                 for hook in hooks:
                     hook.remove()
+
+            # Collect per-source attention weights (eval only).
+            # Each layer stores (B, S_q, N_sources); average over layers and cell positions
+            # to get (B, N_sources), then repeat to align with individual cells (B*S, N_sources).
+            self._last_qc_attn_weights = None
+            if not self.training and self.cross_attn_layers is not None:
+                layer_weights = [
+                    layer._last_attn_weights.mean(dim=1)  # (B, N_sources)
+                    for layer in self.cross_attn_layers
+                    if layer._last_attn_weights is not None
+                ]
+                if layer_weights:
+                    w = torch.stack(layer_weights, dim=0).mean(dim=0)  # (B, N_sources)
+                    # Repeat so one weight row per cell aligns with predict_step outputs
+                    self._last_qc_attn_weights = w.repeat_interleave(
+                        self.cell_sentence_len, dim=0
+                    )  # (B*S, N_sources)
         elif self.hparams.get("mask_attn", False):
             batch_size, seq_length, _ = seq_input.shape
             device = seq_input.device
@@ -884,6 +909,9 @@ class StateTransitionPerturbationModel(PerturbationModel):
             "pert_cell_barcode": batch.get("pert_cell_barcode", None),
             "ctrl_cell_barcode": batch.get("ctrl_cell_barcode", None),
         }
+
+        if self._last_qc_attn_weights is not None:
+            output_dict["qc_attn_weights"] = self._last_qc_attn_weights  # (B*S, N_sources)
 
         # Add confidence prediction to output if available
         if confidence_pred is not None:

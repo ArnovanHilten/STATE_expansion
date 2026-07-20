@@ -76,6 +76,12 @@ class PerturbMeanPerturbationModel(PerturbationModel):
         # We'll store an offset for each (cell_type, pert_name):
         self.offsets: Dict[Tuple[str, str], torch.Tensor] = {}
 
+        # Dimension used for accumulation buffers: gene_dim when reading raw gene
+        # expression (pert_cell_counts), output_dim when reading embeddings.
+        self._accum_dim = self.gene_dim if (
+            self.embed_key and self.embed_key != "X_hvg" and self.output_space == "gene"
+        ) or (self.embed_key and self.output_space == "all") else self.output_dim
+
         # A dummy parameter so that Lightning sees something to "optimize"
         self.dummy_param = nn.Parameter(torch.zeros(1, requires_grad=True))
         self.pert_mean_offsets = {}
@@ -96,7 +102,7 @@ class PerturbMeanPerturbationModel(PerturbationModel):
             return
 
         # First pass: gather sums per cell type
-        celltype_sums = defaultdict(lambda: defaultdict(lambda: {"sum": torch.zeros(self.output_dim), "count": 0}))
+        celltype_sums = defaultdict(lambda: defaultdict(lambda: {"sum": torch.zeros(self._accum_dim), "count": 0}))
 
         with torch.no_grad():
             for batch in train_loader:
@@ -164,12 +170,12 @@ class PerturbMeanPerturbationModel(PerturbationModel):
                 self.pert_mean_offsets[p_name] = torch.stack(pert_deltas).mean(0)
 
             # Add zero offset for control
-            self.pert_mean_offsets[self.control_pert] = torch.zeros(self.output_dim)
+            self.pert_mean_offsets[self.control_pert] = torch.zeros(self._accum_dim)
 
             # Compute global basal as mean of cell-type means
             if not all_ctrl_means:
                 logger.warning("No control cells found in any cell type. Using zero vector as basal.")
-                self.global_basal = torch.zeros(self.output_dim)
+                self.global_basal = torch.zeros(self._accum_dim)
             else:
                 self.global_basal = torch.stack(all_ctrl_means).mean(0)
 
@@ -184,13 +190,13 @@ class PerturbMeanPerturbationModel(PerturbationModel):
         """
         B = len(batch["pert_name"])
         device = self.dummy_param.device
-        pred_out = torch.zeros((B, self.output_dim), device=device)
+        pred_out = torch.zeros((B, self._accum_dim), device=device)
 
         for i in range(B):
             p_name = str(batch["pert_name"][i])
             offset_vec = self.pert_mean_offsets.get(p_name, None)
             if offset_vec is None:
-                offset_vec = torch.zeros(self.output_dim, device=device)
+                offset_vec = torch.zeros(self._accum_dim, device=device)
 
             pred_out[i] = batch["ctrl_cell_emb"][i] + offset_vec.to(device)
 
@@ -251,7 +257,7 @@ class PerturbMeanPerturbationModel(PerturbationModel):
             logger.info("PerturbMean: Loaded global_basal from checkpoint.")
         else:
             logger.warning("PerturbMean: No global_basal found in checkpoint. Using zero vector.")
-            self.global_basal = torch.zeros(self.output_dim)
+            self.global_basal = torch.zeros(self._accum_dim)
 
         # Load perturbation offsets
         if "pert_mean_offsets" in checkpoint:

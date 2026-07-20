@@ -71,6 +71,12 @@ class ContextMeanPerturbationModel(PerturbationModel):
             **kwargs,
         )
 
+        # Dimension used for accumulation buffers: gene_dim when reading raw gene
+        # expression (pert_cell_counts), output_dim when reading embeddings.
+        self._accum_dim = self.gene_dim if (
+            self.embed_key and self.embed_key != "X_hvg" and self.output_space == "gene"
+        ) or (self.embed_key and self.output_space == "all") else self.output_dim
+
         # Dictionary to hold the average perturbed expression for each cell type.
         self.celltype_pert_means: Dict[str, torch.Tensor] = {}
 
@@ -90,12 +96,11 @@ class ContextMeanPerturbationModel(PerturbationModel):
             logger.warning("No train dataloader found. Cannot compute cell type means.")
             return
 
-        # Initialize dictionary to accumulate sum and count for each cell type.
         celltype_sums = defaultdict(
             lambda: {
-                "sum": torch.zeros(self.output_dim),
+                "sum": torch.zeros(self._accum_dim),
                 "count": 0,
-                "control_sum": torch.zeros(self.output_dim),
+                "control_sum": torch.zeros(self._accum_dim),
                 "control_count": 0,
             }
         )
@@ -177,7 +182,7 @@ class ContextMeanPerturbationModel(PerturbationModel):
             and ((self.output_space == "gene" and self.embed_key != "X_hvg") or self.output_space == "all")
             else "pert_cell_emb"
         )
-        pred_out = torch.zeros((B, self.output_dim), device=device)
+        pred_out = torch.zeros((B, self._accum_dim), device=device)
 
         for i in range(B):
             p_name = str(batch["pert_name"][i])

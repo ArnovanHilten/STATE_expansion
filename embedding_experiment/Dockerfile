@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir \
       --index-url https://download.pytorch.org/whl/cu126
 
 # arc-state from STATE_expansion fork (includes QC cross-attention)
-ARG STATE_REF=main
+ARG STATE_REF=feature/qc-cross-attention
 RUN pip install --no-cache-dir \
       "arc-state @ git+https://github.com/ArnovanHilten/STATE_expansion.git@${STATE_REF}"
 

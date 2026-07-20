@@ -68,6 +68,12 @@ def add_arguments_predict(parser: ap.ArgumentParser):
     )
 
     parser.add_argument(
+        "--save-attn-weights",
+        action="store_true",
+        help="If set, collect per-source QC cross-attention weights and save to qc_attn_weights.npz.",
+    )
+
+    parser.add_argument(
         "--shared-only",
         action="store_true",
         help=("If set, restrict predictions/evaluation to perturbations shared between train and test (train ∩ test)."),
@@ -307,6 +313,10 @@ def run_tx_predict(args: ap.ArgumentParser):
     model = ModelClass.load_from_checkpoint(checkpoint_path, weights_only=False, **model_init_kwargs)
     model.eval()
     logger.info("Model loaded successfully.")
+
+    if args.save_attn_weights and hasattr(model, "enable_attn_weight_collection"):
+        model.enable_attn_weight_collection(True)
+        logger.info("QC attention weight collection enabled.")
 
     # 4. Test-time fine-tuning if requested
     if args.test_time_finetune > 0:
@@ -621,6 +631,9 @@ def run_tx_predict(args: ap.ArgumentParser):
     final_preds = np.empty((num_cells, output_dim), dtype=np.float32)
     final_reals = np.empty((num_cells, output_dim), dtype=np.float32)
 
+    # Attention weights from QC cross-attention (filled lazily on first batch)
+    final_qc_attn_weights = None
+
     final_X_hvg = None
     final_pert_cell_counts_preds = None
     if store_raw_expression:
@@ -687,6 +700,13 @@ def run_tx_predict(args: ap.ArgumentParser):
             batch_real_np = batch_preds["pert_cell_emb"].cpu().numpy().astype(np.float32)
             final_preds[current_idx : current_idx + batch_size, :] = batch_pred_np
             final_reals[current_idx : current_idx + batch_size, :] = batch_real_np
+
+            if args.save_attn_weights and "qc_attn_weights" in batch_preds:
+                attn_np = batch_preds["qc_attn_weights"].cpu().numpy().astype(np.float32)
+                if final_qc_attn_weights is None:
+                    final_qc_attn_weights = np.empty((num_cells, attn_np.shape[1]), dtype=np.float32)
+                final_qc_attn_weights[current_idx : current_idx + batch_size, :] = attn_np
+
             current_idx += batch_size
 
             # Handle X_hvg for HVG space ground truth
@@ -750,6 +770,31 @@ def run_tx_predict(args: ap.ArgumentParser):
         # Create adata for real - using the true gene expression values
         # adata_real = anndata.AnnData(X=final_reals, obs=obs, var=var)
         adata_real = anndata.AnnData(X=final_reals, obs=obs)
+
+    # Save QC cross-attention weights into obsm and as a standalone npz (only when --save-attn-weights).
+    if final_qc_attn_weights is not None:
+        adata_pred.obsm["qc_attn_weights"] = final_qc_attn_weights
+        # Also write a standalone file for easy analysis without loading the full adata.
+        source_names = getattr(model, "qc_module", None)
+        src_names_arr = None
+        if source_names is not None and hasattr(source_names, "n_sources"):
+            # Try to recover source names from the npz (stored as a buffer-less attribute)
+            try:
+                import numpy as _np_attn
+                _d = _np_attn.load(model.qc_emb_path, allow_pickle=True)
+                src_names_arr = _d["source_names"] if "source_names" in _d else None
+            except Exception:
+                pass
+        attn_npz_path = os.path.join(results_dir, "qc_attn_weights.npz")
+        save_kwargs = {
+            "attn_weights": final_qc_attn_weights,
+            "pert_names": np.array(all_pert_names),
+            "celltypes": np.array(all_celltypes),
+        }
+        if src_names_arr is not None:
+            save_kwargs["source_names"] = src_names_arr
+        np.savez(attn_npz_path, **save_kwargs)
+        logger.info(f"Saved QC attention weights → {attn_npz_path} (shape {final_qc_attn_weights.shape})")
 
     # Clip extreme values to keep cell-eval log1p checks happy.
     clip_anndata_values(adata_pred, max_value=14.0)
