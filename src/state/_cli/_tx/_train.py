@@ -31,6 +31,7 @@ def run_tx_train(cfg: DictConfig):
         CumulativeFLOPSCallback,
         GradNormCallback,
         ModelFLOPSUtilizationCallback,
+        NaNLossCallback,
     )
     from ...tx.utils import get_checkpoint_callbacks, get_lightning_module, get_loggers
 
@@ -245,6 +246,9 @@ def run_tx_train(cfg: DictConfig):
         cumulative_flops_use_backward = cfg["training"]["cumulative_flops_use_backward"]
         cumulative_flops_cb = CumulativeFLOPSCallback(use_backward=cumulative_flops_use_backward)
         callbacks.append(cumulative_flops_cb)
+
+    if cfg["model"]["name"] == "state":
+        callbacks.append(NaNLossCallback())
 
     logger.info("Loggers and callbacks set up.")
 
