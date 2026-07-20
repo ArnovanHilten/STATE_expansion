@@ -242,6 +242,8 @@ class StateTransitionPerturbationModel(PerturbationModel):
         self._token_features: Optional[torch.Tensor] = None
         # Populated during eval when use_qc_cross_attn=True: (B*S, N_sources)
         self._last_qc_attn_weights: Optional[torch.Tensor] = None
+        # Set via set_ablate_source() before predict to mask one source column
+        self._ablate_source: Optional[int] = None
 
         # if the model is outputting to counts space, apply relu
         # otherwise its in embedding space and we don't want to
@@ -440,6 +442,18 @@ class StateTransitionPerturbationModel(PerturbationModel):
             for layer in self.cross_attn_layers:
                 layer._collect_attn_weights = enable
 
+    def set_ablate_source(self, source_idx: Optional[int]) -> None:
+        """Force-mask one source during lookup for ablation analysis.
+
+        Args:
+            source_idx: 0-based index into the N_sources dimension, or None to disable.
+        """
+        if source_idx is not None and self.qc_module is not None:
+            n = self.qc_module.n_sources
+            if not (0 <= source_idx < n):
+                raise ValueError(f"source_idx {source_idx} out of range [0, {n})")
+        self._ablate_source: Optional[int] = source_idx
+
     def encode_perturbation(self, pert: torch.Tensor) -> torch.Tensor:
         """If needed, define how we embed the raw perturbation input."""
         return self.pert_encoder(pert)
@@ -533,7 +547,7 @@ class StateTransitionPerturbationModel(PerturbationModel):
                 gene_idx = seq_input.new_full((batch_size_here,), -1, dtype=torch.long)
 
             # Lookup QuantumCell KV tokens: (B, N, d_model) and optional (B, N) mask
-            qc_kv, qc_mask = self.qc_module.lookup(gene_idx)
+            qc_kv, qc_mask = self.qc_module.lookup(gene_idx, ablate_source=self._ablate_source)
 
             # Use forward hooks on each decoder layer to inject cross-attention after every
             # cross_attn_freq layers. This lets LlamaBidirectionalModel handle all attention

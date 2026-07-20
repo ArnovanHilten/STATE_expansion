@@ -141,12 +141,17 @@ class GeneEmbeddingCrossAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def lookup(
-        self, gene_indices: torch.Tensor
+        self,
+        gene_indices: torch.Tensor,
+        ablate_source: Optional[int] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Look up and project QuantumCell embeddings for a batch of gene indices.
 
         Args:
-            gene_indices: (B,) LongTensor. Use -1 for unknown genes.
+            gene_indices:  (B,) LongTensor. Use -1 for unknown genes.
+            ablate_source: When set to an integer 0..N_sources-1, force-masks that
+                           source column so the model cannot attend to it. Used for
+                           source ablation importance analysis.
 
         Returns:
             kv:              (B, N, d_model) — projected embedding tokens
@@ -174,6 +179,11 @@ class GeneEmbeddingCrossAttention(nn.Module):
             if unknown_mask.any():
                 pad_mask = pad_mask.clone()
                 pad_mask[unknown_mask] = True               # mask all sources for unknown genes
+
+            # Source ablation: force-mask the chosen source column for every gene
+            if ablate_source is not None:
+                pad_mask = pad_mask.clone()
+                pad_mask[:, ablate_source] = True
 
             # If no token is masked, return None to avoid unnecessary masking overhead
             key_padding_mask: Optional[torch.Tensor] = pad_mask if pad_mask.any() else None

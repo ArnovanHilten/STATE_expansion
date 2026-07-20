@@ -74,6 +74,15 @@ def add_arguments_predict(parser: ap.ArgumentParser):
     )
 
     parser.add_argument(
+        "--ablate-source",
+        type=int,
+        default=None,
+        metavar="S",
+        help="If set, mask source S (0-based) from QC cross-attention during prediction. "
+             "Results are written to a subdirectory named ablate_source_S/.",
+    )
+
+    parser.add_argument(
         "--shared-only",
         action="store_true",
         help=("If set, restrict predictions/evaluation to perturbations shared between train and test (train ∩ test)."),
@@ -318,6 +327,10 @@ def run_tx_predict(args: ap.ArgumentParser):
         model.enable_attn_weight_collection(True)
         logger.info("QC attention weight collection enabled.")
 
+    if args.ablate_source is not None and hasattr(model, "set_ablate_source"):
+        model.set_ablate_source(args.ablate_source)
+        logger.info(f"QC source ablation enabled: masking source index {args.ablate_source}.")
+
     # 4. Test-time fine-tuning if requested
     if args.test_time_finetune > 0:
         data_module.batch_size = 1
@@ -366,10 +379,10 @@ def run_tx_predict(args: ap.ArgumentParser):
     if args.pseudobulk:
         logger.info("Pseudobulk enabled; aggregating running means by (context, perturbation).")
 
-        if args.eval_train_data:
-            results_dir = os.path.join(args.output_dir, "eval_train_" + os.path.basename(args.checkpoint))
-        else:
-            results_dir = os.path.join(args.output_dir, "eval_" + os.path.basename(args.checkpoint))
+        _ckpt_tag = ("eval_train_" if args.eval_train_data else "eval_") + os.path.basename(args.checkpoint)
+        if args.ablate_source is not None:
+            _ckpt_tag = f"ablate_source_{args.ablate_source}/" + _ckpt_tag
+        results_dir = os.path.join(args.output_dir, _ckpt_tag)
         os.makedirs(results_dir, exist_ok=True)
 
         pseudo_x_dim = None
@@ -828,10 +841,10 @@ def run_tx_predict(args: ap.ArgumentParser):
             )
 
     # Save the AnnData objects
-    if args.eval_train_data:
-        results_dir = os.path.join(args.output_dir, "eval_train_" + os.path.basename(args.checkpoint))
-    else:
-        results_dir = os.path.join(args.output_dir, "eval_" + os.path.basename(args.checkpoint))
+    _ckpt_tag = ("eval_train_" if args.eval_train_data else "eval_") + os.path.basename(args.checkpoint)
+    if args.ablate_source is not None:
+        _ckpt_tag = f"ablate_source_{args.ablate_source}/" + _ckpt_tag
+    results_dir = os.path.join(args.output_dir, _ckpt_tag)
     os.makedirs(results_dir, exist_ok=True)
     adata_pred_path = os.path.join(results_dir, "adata_pred.h5ad")
     adata_real_path = os.path.join(results_dir, "adata_real.h5ad")
