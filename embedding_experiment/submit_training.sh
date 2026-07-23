@@ -50,7 +50,7 @@ cd /dcai/projects/cu_0055/code/state_expansion/embedding_experiment
 HIDDEN_DIM=128
 CELL_SET_LEN=32
 BATCHSIZE=64
-QC_EMB_PATH="/dcai/users/hilarn/55_cu_0055/data/embeddings/STATE_embedddings/gene_embeddings_combined.npz"
+QC_EMB_PATH="/dcai/users/hilarn/55_cu_0055/data/embeddings/STATE_embedddings/gene_embeddings_combined_with_gpt.npz"
 
 SHARED_ARGS="
   data.kwargs.toml_config_path=toml/SE_R_Rk562.toml
