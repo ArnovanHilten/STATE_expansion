@@ -15,7 +15,7 @@
 # =========================
 RUN_DIR="/dcai/users/hilarn/55_cu_0055/code/enhance_state/results/30/qc_emb_30_lr1e-4/qc_emb_30_lr1e-4"
 CHECKPOINT="last.ckpt"
-N_SOURCES=24   # number of QC sources; must match the npz (22 + GenePT + GeneGenePT)
+N_SOURCES=9    # number of QC sources in gene_embeddings_slim.npz
 
 # =========================
 # Environment setup
