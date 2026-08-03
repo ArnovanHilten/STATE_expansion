@@ -3,8 +3,13 @@
 Combine the slim set of per-source npz files into gene_embeddings_slim.npz.
 
 Reads all *.npz files from SLIM_SOURCES_DIR (each has keys: embedding, mask,
-gene_ids, source, dim), concatenates them column-wise, L2-normalises rows,
-and writes gene_embeddings_slim.npz in the same directory as this script.
+gene_ids, source, dim), concatenates them column-wise, and writes
+gene_embeddings_slim.npz in the same directory as this script.
+
+No joint L2-normalisation is applied after concatenation: each source's slice
+is already L2-normalised per gene within its own file, so their magnitudes are
+independent. This keeps source ablation clean — masking source s does not
+affect the scale of other sources' KV inputs.
 
 Gene symbols are borrowed from the existing gene_embeddings_combined.npz
 (same vocabulary, already resolved via mygene).
@@ -73,11 +78,9 @@ def main() -> None:
         labels.append(label)
         dims.append(dim)
 
-    # Concatenate and re-L2-normalise rows
+    # Concatenate — no joint renorm so each source's slice stays at its own scale,
+    # keeping ablation clean (masking source s has no effect on other sources' magnitudes).
     combined = np.concatenate(blocks, axis=1).astype(np.float32)
-    norms = np.linalg.norm(combined, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    combined /= norms
 
     mask_per_source = np.stack(masks, axis=1)          # (G, S)
     mask_any        = mask_per_source.all(axis=1)      # (G,)

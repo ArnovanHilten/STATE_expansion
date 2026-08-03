@@ -38,6 +38,7 @@ cd /dcai/users/hilarn/55_cu_0055/code/enhance_state
 CUDA_VISIBLE_DEVICES=0 state tx predict \
     --output-dir "${RUN_DIR}" \
     --checkpoint "${CHECKPOINT}" \
+    --save-attn-weights \
     --profile full &
 
 wait
