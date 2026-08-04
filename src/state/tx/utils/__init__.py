@@ -88,6 +88,8 @@ def get_loggers(
     cfg: dict = None,
 ):
     """Set up logging to local CSV and optionally WandB."""
+    import os
+
     loggers = []
 
     # Use robust CSV logger that handles dynamic metrics
@@ -101,12 +103,25 @@ def get_loggers(
             # Check if wandb is available
             import wandb
 
+            # Resume existing W&B run if we're continuing a previous training
+            wandb_run_id = None
+            wandb_path_file = os.path.join(output_dir, name, "wandb_path.txt")
+            if os.path.exists(wandb_path_file):
+                with open(wandb_path_file) as f:
+                    run_path = f.read().strip()
+                # run_path format: entity/project/runs/run_id
+                parts = run_path.split("/")
+                if len(parts) >= 1:
+                    wandb_run_id = parts[-1]
+
             wandb_logger = WandbLogger(
                 name=name,
                 project=wandb_project,
                 entity=wandb_entity,
                 dir=local_wandb_dir,
                 tags=cfg["wandb"].get("tags", []) if cfg else [],
+                id=wandb_run_id,
+                resume="allow" if wandb_run_id else None,
             )
             if cfg is not None:
                 wandb_logger.experiment.config.update(cfg)

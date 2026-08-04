@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=state_qc_emb_R_Rk562
+#SBATCH --job-name=Tian
 #SBATCH --nodes=1
 #SBATCH --account=cu_0055
 #SBATCH --gres=gpu:4
 #SBATCH --time=96:00:00
 #SBATCH --mem=1800GB
-#SBATCH --output=state_qc_emb_R_Rk562_%j.log
+#SBATCH --output=Tian_%j.log
 #SBATCH --container-mounts=/dcai:/dcai,/etc/ssl/certs:/etc/ssl/certs
-#SBATCH --container-image=/dcai/projects01/cu_0055/notebooks/state_expansion/state_expansion.sqsh
+#SBATCH --container-image=/dcai/users/hilarn/55_cu_0055/dockers/latest/dcai_test+docker_test+state-expansion.sqsh
 
 # =========================
 # Configurable run number
@@ -41,7 +41,7 @@ echo "NODELIST=${SLURM_NODELIST}"
 echo "GPUS_REQUESTED=${SLURM_JOB_GPUS}"
 echo "RUN_ID=${RUN_ID}"
 
-cd /dcai/projects/cu_0055/code/state_expansion/embedding_experiment
+cd /dcai/users/hilarn/55_cu_0055/code/enhance_state
 
 # =========================
 # Shared config
@@ -61,7 +61,7 @@ SHARED_ARGS="
   data.kwargs.pert_col=gene
   data.kwargs.cell_type_key=cell_line
   data.kwargs.control_pert=non-targeting
-  training.max_steps=80000
+  training.max_steps=160000
   training.ckpt_every_n_steps=2000
   training.batch_size=${BATCHSIZE}
   model.kwargs.cell_set_len=${CELL_SET_LEN}

@@ -249,6 +249,14 @@ def run_tx_train(cfg: DictConfig):
 
     if cfg["model"]["name"] == "state":
         callbacks.append(NaNLossCallback())
+        callbacks.append(
+            pl.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=10,
+                mode="min",
+                verbose=True,
+            )
+        )
 
     logger.info("Loggers and callbacks set up.")
 
