@@ -54,6 +54,16 @@ kwargs:
   qc_mode: per_source      # "per_source" (22 KV tokens, more expressive) or "combined" (1 KV token)
   cross_attn_freq: 3       # insert one cross-attn block after every N self-attn layers
 
+  # CIPHER-inspired covariance prior cross-attention (context-conditioned; shares the same
+  # cross-attention layers/frequency as the QuantumCell source above, and can be enabled
+  # independently or alongside it). See scripts/build_covariance_registry.py.
+  use_cov_cross_attn: false
+  cov_registry_path: null  # path to covariance_registry.npz
+  cov_dropout:              # train-time mismatch augmentation probabilities (sum <= 1.0)
+      none: 0.15            # fall back to the learned [NO_COV] token
+      wrong_context: 0.10   # substitute a random other context's covariance
+      shuffled_gene: 0.05   # substitute a random other gene's covariance in the same context
+
   lora:
       enable: false
       r: 16

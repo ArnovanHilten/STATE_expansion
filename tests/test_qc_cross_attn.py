@@ -300,9 +300,9 @@ def test_st_pert_name_stride_picks_correct_gene(mock_npz):
     captured = {}
     original_lookup = model.qc_module.lookup
 
-    def capturing_lookup(gene_indices):
+    def capturing_lookup(gene_indices, ablate_source=None):
         captured["gene_indices"] = gene_indices.tolist()
-        return original_lookup(gene_indices)
+        return original_lookup(gene_indices, ablate_source=ablate_source)
 
     model.qc_module.lookup = capturing_lookup
 

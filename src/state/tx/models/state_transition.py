@@ -11,7 +11,11 @@ from geomloss import SamplesLoss
 from typing import Dict, Optional, Tuple
 
 from .base import PerturbationModel
-from .cross_attention import GeneEmbeddingCrossAttention, QuantumCellCrossAttentionLayer
+from .cross_attention import (
+    CovariancePriorCrossAttention,
+    GeneEmbeddingCrossAttention,
+    QuantumCellCrossAttentionLayer,
+)
 from .decoders import FinetuneVCICountsDecoder
 from .utils import build_mlp, get_activation_class, get_transformer_backbone, apply_lora
 
@@ -188,6 +192,13 @@ class StateTransitionPerturbationModel(PerturbationModel):
         self.qc_emb_path = kwargs.get("qc_emb_path", None)
         self.qc_mode = kwargs.get("qc_mode", "per_source")
         self.cross_attn_freq = int(kwargs.get("cross_attn_freq", 3))
+
+        # Covariance-prior cross-attention kwargs must also be set before _build_networks.
+        # Context-conditioned counterpart to the (static) QuantumCell prior above: see
+        # scripts/build_covariance_registry.py and CovariancePriorCrossAttention.
+        self.use_cov_cross_attn = kwargs.get("use_cov_cross_attn", False)
+        self.cov_registry_path = kwargs.get("cov_registry_path", None)
+        self.cov_dropout = kwargs.get("cov_dropout", None)
 
         # Build the underlying neural OT network
         self._build_networks(lora_cfg=kwargs.get("lora", None))
@@ -396,13 +407,22 @@ class StateTransitionPerturbationModel(PerturbationModel):
                 nn.Linear(self.output_dim // 8, self.output_dim),
             )
 
-        # QuantumCell cross-attention layers (interleaved with transformer backbone)
+        # Cross-attention layers (interleaved with transformer backbone). Shared by both
+        # the QuantumCell static-prior source and the covariance-prior source below — a
+        # cross-attention block just attends over however many KV tokens it's handed, so
+        # the two sources can be enabled independently or together.
         self.qc_module: Optional[GeneEmbeddingCrossAttention] = None
+        self.cov_module: Optional[CovariancePriorCrossAttention] = None
         self.cross_attn_layers: Optional[nn.ModuleList] = None
         # Mapping from gene symbol / ENSG ID → embedding row index.  Built from the
         # same npz used by GeneEmbeddingCrossAttention so the model can resolve
         # batch["pert_name"] strings without needing the dataset to emit pert_gene_idx.
         self._gene_name_to_idx: Optional[dict] = None
+        # Covariance registry's own gene/context maps (may use a different gene vocab
+        # than the QuantumCell npz, since it's derived from the training data itself).
+        self._cov_gene_name_to_idx: Optional[dict] = None
+        self._cov_context_name_to_idx: Optional[dict] = None
+
         if self.use_qc_cross_attn:
             if not self.qc_emb_path:
                 raise ValueError("use_qc_cross_attn=True requires qc_emb_path to be set.")
@@ -410,12 +430,6 @@ class StateTransitionPerturbationModel(PerturbationModel):
                 emb_path=self.qc_emb_path,
                 d_model=self.hidden_dim,
                 mode=self.qc_mode,
-            )
-            n_layers = self.transformer_backbone_kwargs.get("num_hidden_layers", 8)
-            nhead = self.transformer_backbone_kwargs.get("num_attention_heads", 12)
-            n_ca = n_layers // self.cross_attn_freq
-            self.cross_attn_layers = nn.ModuleList(
-                [QuantumCellCrossAttentionLayer(self.hidden_dim, nhead) for _ in range(n_ca)]
             )
             # Build gene-name → index lookup from the npz (ENSG IDs + gene symbols)
             import numpy as _np
@@ -432,9 +446,34 @@ class StateTransitionPerturbationModel(PerturbationModel):
             self._gene_name_to_idx = _mapping
             logger.info(
                 f"QuantumCell cross-attention enabled: mode={self.qc_mode}, "
-                f"cross_attn_freq={self.cross_attn_freq}, n_ca_layers={n_ca}, "
+                f"cross_attn_freq={self.cross_attn_freq}, "
                 f"gene_name_to_idx size={len(_mapping)}"
             )
+
+        if self.use_cov_cross_attn:
+            if not self.cov_registry_path:
+                raise ValueError("use_cov_cross_attn=True requires cov_registry_path to be set.")
+            self.cov_module = CovariancePriorCrossAttention(
+                registry_path=self.cov_registry_path,
+                d_model=self.hidden_dim,
+                cov_dropout=self.cov_dropout,
+            )
+            self._cov_gene_name_to_idx = self.cov_module.gene_name_to_idx
+            self._cov_context_name_to_idx = self.cov_module.context_name_to_idx
+            logger.info(
+                f"Covariance-prior cross-attention enabled: n_contexts={self.cov_module.n_contexts}, "
+                f"n_genes={self.cov_module.n_genes}, k={self.cov_module.k}, "
+                f"cov_dropout={self.cov_dropout}"
+            )
+
+        if self.use_qc_cross_attn or self.use_cov_cross_attn:
+            n_layers = self.transformer_backbone_kwargs.get("num_hidden_layers", 8)
+            nhead = self.transformer_backbone_kwargs.get("num_attention_heads", 12)
+            n_ca = n_layers // self.cross_attn_freq
+            self.cross_attn_layers = nn.ModuleList(
+                [QuantumCellCrossAttentionLayer(self.hidden_dim, nhead) for _ in range(n_ca)]
+            )
+            logger.info(f"Cross-attention: cross_attn_freq={self.cross_attn_freq}, n_ca_layers={n_ca}")
 
     def enable_attn_weight_collection(self, enable: bool = True) -> None:
         """Toggle per-source attention weight collection for all cross-attention layers."""
@@ -453,6 +492,68 @@ class StateTransitionPerturbationModel(PerturbationModel):
             if not (0 <= source_idx < n):
                 raise ValueError(f"source_idx {source_idx} out of range [0, {n})")
         self._ablate_source: Optional[int] = source_idx
+
+    def register_covariance_context(
+        self,
+        context_name: str,
+        control_counts,
+        gene_names: Optional[list] = None,
+        **kwargs,
+    ) -> int:
+        """Register a brand-new context's covariance prior at inference time, from its own
+        control/non-targeting cells — no offline registry rebuild required. See
+        CovariancePriorCrossAttention.register_context for the full shrinkage details.
+
+        Once registered, batches with cell_type/dataset_name resolving to `context_name`
+        (i.e. "{dataset_name}.{cell_type}" == context_name) immediately use it in forward().
+        """
+        if self.cov_module is None:
+            raise ValueError("register_covariance_context requires use_cov_cross_attn=True")
+        return self.cov_module.register_context(context_name, control_counts, gene_names=gene_names, **kwargs)
+
+    def reset_covariance_contexts(self) -> None:
+        """Drop every context added via register_covariance_context(), restoring the offline registry."""
+        if self.cov_module is None:
+            raise ValueError("reset_covariance_contexts requires use_cov_cross_attn=True")
+        self.cov_module.reset_online_contexts()
+
+    def _resolve_context_idx(self, batch: dict, padded: bool, device: torch.device) -> torch.Tensor:
+        """Resolve the biological context per cell-set → (B,) LongTensor of registry indices.
+
+        Context keys are built as "{dataset_name}.{cell_type}", matching
+        scripts/build_covariance_registry.py. Falls back to -1 (unknown → [NO_COV] token)
+        when either field is missing from the batch or absent from the registry.
+        """
+        context_map = self._cov_context_name_to_idx
+        cell_types = batch.get("cell_type")
+        dataset_names = batch.get("dataset_name")
+
+        if cell_types is None or context_map is None:
+            batch_size_here = (
+                len(cell_types[:: self.cell_sentence_len]) if cell_types is not None and padded else 1
+            )
+            return torch.full((batch_size_here,), -1, dtype=torch.long, device=device)
+
+        if padded:
+            cell_types_per_set = cell_types[:: self.cell_sentence_len]
+            dataset_names_per_set = (
+                dataset_names[:: self.cell_sentence_len] if dataset_names is not None else None
+            )
+        else:
+            cell_types_per_set = cell_types[:1]
+            dataset_names_per_set = dataset_names[:1] if dataset_names is not None else None
+
+        indices = []
+        for i, ct in enumerate(cell_types_per_set):
+            ds = str(dataset_names_per_set[i]) if dataset_names_per_set is not None else None
+            key = f"{ds}.{ct}" if ds is not None else None
+            idx = context_map.get(key, -1) if key is not None else -1
+            if idx < 0:
+                # Fall back to matching on cell_type alone if the combined key isn't found
+                # (e.g. dataset_name unavailable, or registry built without a dataset prefix).
+                idx = context_map.get(str(ct), -1)
+            indices.append(idx)
+        return torch.tensor(indices, dtype=torch.long, device=device)
 
     def encode_perturbation(self, pert: torch.Tensor) -> torch.Tensor:
         """If needed, define how we embed the raw perturbation input."""
@@ -521,33 +622,57 @@ class StateTransitionPerturbationModel(PerturbationModel):
             seq_input = self.confidence_token.append_confidence_token(seq_input)
 
         # forward pass + extract CLS last hidden state
-        if self.use_qc_cross_attn and self.qc_module is not None and self.cross_attn_layers is not None:
-            # Resolve the perturbed gene index per cell set → (B,) LongTensor.
-            # Prefer pert_name (always in batch) over pert_gene_idx (rarely emitted).
+        if self.cross_attn_layers is not None and (
+            (self.use_qc_cross_attn and self.qc_module is not None)
+            or (self.use_cov_cross_attn and self.cov_module is not None)
+        ):
+            # Resolve the perturbed gene index per cell set → (B,) LongTensor, against a
+            # given name→idx map. pert_name is repeated cell_sentence_len times when the
+            # batch is padded; take the first occurrence per cell-set to get one name per (B,).
             pert_names = batch.get("pert_name")  # list[str], one per cell-set row
             raw_gene_idx = batch.get("pert_gene_idx")
-            if pert_names is not None and self._gene_name_to_idx is not None:
-                # pert_name is repeated cell_sentence_len times when the batch is padded;
-                # take the first occurrence per cell-set to get one name per (B,).
-                if padded:
-                    # pert_names has length B*S — take every cell_sentence_len-th entry
-                    names_per_set = pert_names[:: self.cell_sentence_len]
-                else:
-                    names_per_set = pert_names[:1]
-                indices = [self._gene_name_to_idx.get(str(n), -1) for n in names_per_set]
-                gene_idx = torch.tensor(indices, dtype=torch.long, device=seq_input.device)
-            elif raw_gene_idx is not None:
-                if padded:
-                    gene_idx = raw_gene_idx.reshape(-1, self.cell_sentence_len)[:, 0]
-                else:
-                    gene_idx = raw_gene_idx.reshape(1, -1)[:, 0]
+            if padded:
+                names_per_set = pert_names[:: self.cell_sentence_len] if pert_names is not None else None
             else:
-                # No gene information available — use -1 (unknown) for all items
-                batch_size_here = seq_input.shape[0]
-                gene_idx = seq_input.new_full((batch_size_here,), -1, dtype=torch.long)
+                names_per_set = pert_names[:1] if pert_names is not None else None
 
-            # Lookup QuantumCell KV tokens: (B, N, d_model) and optional (B, N) mask
-            qc_kv, qc_mask = self.qc_module.lookup(gene_idx, ablate_source=self._ablate_source)
+            def resolve_gene_idx(name_to_idx: Optional[dict]) -> torch.Tensor:
+                if names_per_set is not None and name_to_idx is not None:
+                    indices = [name_to_idx.get(str(n), -1) for n in names_per_set]
+                    return torch.tensor(indices, dtype=torch.long, device=seq_input.device)
+                if raw_gene_idx is not None:
+                    if padded:
+                        return raw_gene_idx.reshape(-1, self.cell_sentence_len)[:, 0]
+                    return raw_gene_idx.reshape(1, -1)[:, 0]
+                batch_size_here = seq_input.shape[0]
+                return seq_input.new_full((batch_size_here,), -1, dtype=torch.long)
+
+            kv_list = []
+            mask_list = []
+
+            if self.use_qc_cross_attn and self.qc_module is not None:
+                gene_idx = resolve_gene_idx(self._gene_name_to_idx)
+                # Lookup QuantumCell KV tokens: (B, N, d_model) and optional (B, N) mask
+                qc_kv, qc_mask = self.qc_module.lookup(gene_idx, ablate_source=self._ablate_source)
+                kv_list.append(qc_kv)
+                mask_list.append(qc_mask if qc_mask is not None else torch.zeros(qc_kv.shape[:2], dtype=torch.bool, device=qc_kv.device))
+
+            if self.use_cov_cross_attn and self.cov_module is not None:
+                cov_gene_idx = resolve_gene_idx(self._cov_gene_name_to_idx)
+                # Resolve the biological context per cell-set the same way as pert_name,
+                # matching the "{dataset_name}.{cell_type}" keys used when the registry
+                # was built (see scripts/build_covariance_registry.py).
+                context_idx = self._resolve_context_idx(batch, padded, seq_input.device)
+                # Lookup covariance-prior KV token: (B, 1, d_model), mask is always None
+                # (unknown pairs substitute the learned [NO_COV] token instead of masking).
+                cov_kv, cov_mask = self.cov_module.lookup(context_idx, cov_gene_idx)
+                kv_list.append(cov_kv)
+                mask_list.append(torch.zeros(cov_kv.shape[:2], dtype=torch.bool, device=cov_kv.device))
+
+            combined_kv = torch.cat(kv_list, dim=1)  # (B, N_total, d_model)
+            combined_mask = torch.cat(mask_list, dim=1) if len(mask_list) > 1 else mask_list[0]
+            if not combined_mask.any():
+                combined_mask = None
 
             # Use forward hooks on each decoder layer to inject cross-attention after every
             # cross_attn_freq layers. This lets LlamaBidirectionalModel handle all attention
@@ -562,7 +687,7 @@ class StateTransitionPerturbationModel(PerturbationModel):
 
                 def hook(module, input, output):  # noqa: ARG001
                     if applies:
-                        return cross_attn_layers[ca_slot](output, qc_kv, key_padding_mask=qc_mask)
+                        return cross_attn_layers[ca_slot](output, combined_kv, key_padding_mask=combined_mask)
 
                 return hook
 
@@ -576,23 +701,24 @@ class StateTransitionPerturbationModel(PerturbationModel):
                 for hook in hooks:
                     hook.remove()
 
-            # Collect per-source attention weights (eval only).
-            # Each layer stores (B, S_q, N_sources). Average across layers, then
-            # reshape to (B*S_q, N_sources) so each cell row has its own weight vector.
-            # This works for both padded (B>1, S_q=cell_sentence_len) and unpadded
-            # (B=1, S_q=actual_n_cells) predict paths.
+            # Collect per-source attention weights (eval only). Each layer stores
+            # (B, S_q, N_total) over the concatenated KV sources (QC sources, then the
+            # covariance-prior token if enabled). Average across layers, then reshape to
+            # (B*S_q, N_total) so each cell row has its own weight vector. This works for
+            # both padded (B>1, S_q=cell_sentence_len) and unpadded (B=1, S_q=actual_n_cells)
+            # predict paths.
             self._last_qc_attn_weights = None
             if not self.training and self.cross_attn_layers is not None:
                 layer_weights = [
-                    layer._last_attn_weights  # (B, S_q, N_sources)
+                    layer._last_attn_weights  # (B, S_q, N_total)
                     for layer in self.cross_attn_layers
                     if layer._last_attn_weights is not None
                 ]
                 if layer_weights:
                     # Average across layers, then flatten B and S_q into one dim
-                    w = torch.stack(layer_weights, dim=0).mean(dim=0)  # (B, S_q, N_sources)
+                    w = torch.stack(layer_weights, dim=0).mean(dim=0)  # (B, S_q, N_total)
                     B, S_q, N = w.shape
-                    self._last_qc_attn_weights = w.reshape(B * S_q, N)  # (B*S_q, N_sources)
+                    self._last_qc_attn_weights = w.reshape(B * S_q, N)  # (B*S_q, N_total)
         elif self.hparams.get("mask_attn", False):
             batch_size, seq_length, _ = seq_input.shape
             device = seq_input.device
