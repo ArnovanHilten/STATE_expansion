@@ -1,19 +1,21 @@
 #!/bin/bash
-#SBATCH --job-name=predict_qc_emb
-#SBATCH --account=cu_0055
+#SBATCH --job-name=state_predict
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:1
-#SBATCH --time=24:00:00
-#SBATCH --output=predict_qc_emb_%j.log
+#SBATCH --account=cu_0055
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=64
+#SBATCH --time=12:00:00
+#SBATCH --mem=400GB
+#SBATCH --output=state_predict_log_%j.log
 #SBATCH --container-mounts=/dcai:/dcai,/etc/ssl/certs:/etc/ssl/certs
 #SBATCH --container-image=/dcai/users/hilarn/55_cu_0055/dockers/latest/dcai_test+docker_test+state-expansion.sqsh
 
 # =========================
-# Configurable run number
+# Configurable
 # =========================
-RUN_ID="20"   # must match the training RUN_ID
+RUN_ID="31"
+CHECKPOINT="best.ckpt"
+BASE="/dcai/users/hilarn/55_cu_0055/code/enhance_state/results/${RUN_ID}"
 
 # =========================
 # Environment setup
@@ -21,38 +23,68 @@ RUN_ID="20"   # must match the training RUN_ID
 
 unset LMOD_CMD
 
-export NCCL_SOCKET_IFNAME=ens6f0
-export NCCL_IB_HCA=mlx5_0:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_9:1,mlx5_10:1,mlx5_11:1
-export UCX_NET_DEVICES=mlx5_0:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_9:1,mlx5_10:1,mlx5_11:1
-export SHARP_COLL_ENABLE_PCI_RELAXED_ORDERING=1
-export NCCL_COLLNET_ENABLE=0
-export OMPI_MCA_coll_hcoll_enable=0
-export OMPI_MCA_btl=^vader,tcp,openib,uct
-export OMPI_MCA_pml=ucx
-
 export WANDB_BASE_URL="https://wandb.gefion.dcai.dk"
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 echo "NODELIST=${SLURM_NODELIST}"
-echo "GPUS_REQUESTED=${SLURM_JOB_GPUS}"
-echo "RUN_ID=${RUN_ID}"
-
 cd /dcai/users/hilarn/55_cu_0055/code/enhance_state
 
 # =========================
-# Run predict sequentially for all runs in this RUN_ID
+# Replogle runs (batch 1 — GPUs 0-3)
 # =========================
+echo "=== Replogle predict ==="
 
-for run_dir in "results/${RUN_ID}"/*/*/; do
-  run_dir=${run_dir%/}
-  base=$(basename "$run_dir")
+CUDA_VISIBLE_DEVICES=0 state tx predict \
+    --output-dir "${BASE}/qc_emb_lr1e-4/qc_emb_${RUN_ID}_lr1e-4" \
+    --checkpoint "${CHECKPOINT}" \
+    --profile full &
 
-  echo "Running predict for ${base}"
+CUDA_VISIBLE_DEVICES=1 state tx predict \
+    --output-dir "${BASE}/qc_emb_lr1e-5/qc_emb_${RUN_ID}_lr1e-5" \
+    --checkpoint "${CHECKPOINT}" \
+    --profile full &
 
-  CUDA_VISIBLE_DEVICES=0 state tx predict \
-    --output-dir "${run_dir}" \
-    --checkpoint "best.ckpt"
-done
+CUDA_VISIBLE_DEVICES=2 state tx predict \
+    --output-dir "${BASE}/baseline_lr1e-4/baseline_${RUN_ID}_lr1e-4" \
+    --checkpoint "${CHECKPOINT}" \
+    --profile full &
+
+CUDA_VISIBLE_DEVICES=3 state tx predict \
+    --output-dir "${BASE}/baseline_lr1e-5/baseline_${RUN_ID}_lr1e-5" \
+    --checkpoint "${CHECKPOINT}" \
+    --profile full &
+
+wait
+echo "Replogle predict done."
+
+# =========================
+# Tian runs (batch 2 — GPUs 0-3)
+# =========================
+echo "=== Tian predict ==="
+
+CUDA_VISIBLE_DEVICES=0 state tx predict \
+    --output-dir "${BASE}/qc_emb_Tian_lr1e-4/qc_emb_Tian_${RUN_ID}_lr1e-4" \
+    --checkpoint "${CHECKPOINT}" \
+    --profile full &
+
+CUDA_VISIBLE_DEVICES=1 state tx predict \
+    --output-dir "${BASE}/qc_emb_Tian_lr1e-5/qc_emb_Tian_${RUN_ID}_lr1e-5" \
+    --checkpoint "${CHECKPOINT}" \
+    --profile full &
+
+CUDA_VISIBLE_DEVICES=2 state tx predict \
+    --output-dir "${BASE}/baseline_Tian_lr1e-4/baseline_Tian_${RUN_ID}_lr1e-4" \
+    --checkpoint "${CHECKPOINT}" \
+    --profile full &
+
+CUDA_VISIBLE_DEVICES=3 state tx predict \
+    --output-dir "${BASE}/baseline_Tian_lr1e-5/baseline_Tian_${RUN_ID}_lr1e-5" \
+    --checkpoint "${CHECKPOINT}" \
+    --profile full &
+
+wait
+echo "Tian predict done."
+
+echo "All predict jobs complete."

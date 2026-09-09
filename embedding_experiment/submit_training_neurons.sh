@@ -54,7 +54,7 @@ BATCHSIZE=64
 QC_EMB_PATH="/dcai/users/hilarn/55_cu_0055/data/embeddings/STATE_embedddings/gene_embeddings_slim.npz"
 
 SHARED_ARGS="
-  data.kwargs.toml_config_path=toml/SE_R_Rk562.toml
+  data.kwargs.toml_config_path=toml/Tian1921.toml
   data.kwargs.num_workers=30
   data.kwargs.embed_key=X_state
   data.kwargs.output_space=gene
@@ -87,9 +87,9 @@ CUDA_VISIBLE_DEVICES=0 state tx train \
   model.kwargs.qc_mode=per_source \
   model.kwargs.cross_attn_freq=3 \
   training.lr=1e-4 \
-  wandb.tags='["'"${RUN_ID}"'", "qc_emb", "lr1e-4"]' \
-  output_dir="results/${RUN_ID}/qc_emb_lr1e-4" \
-  name="qc_emb_${RUN_ID}_lr1e-4" &
+  wandb.tags='["'"${RUN_ID}"'", "Tian", "qc_emb", "lr1e-4"]' \
+  output_dir="results/${RUN_ID}/qc_emb_Tian_lr1e-4" \
+  name="qc_emb_Tian_${RUN_ID}_lr1e-4" &
 
 CUDA_VISIBLE_DEVICES=1 state tx train \
   ${SHARED_ARGS} \
@@ -98,9 +98,9 @@ CUDA_VISIBLE_DEVICES=1 state tx train \
   model.kwargs.qc_mode=per_source \
   model.kwargs.cross_attn_freq=3 \
   training.lr=1e-5 \
-  wandb.tags='["'"${RUN_ID}"'", "qc_emb", "lr1e-5"]' \
-  output_dir="results/${RUN_ID}/qc_emb_lr1e-5" \
-  name="qc_emb_${RUN_ID}_lr1e-5" &
+  wandb.tags='["'"${RUN_ID}"'", "Tian", "qc_emb", "lr1e-5"]' \
+  output_dir="results/${RUN_ID}/qc_emb_Tian_lr1e-5" \
+  name="qc_emb_Tian_${RUN_ID}_lr1e-5" &
 
 # =========================
 # Baseline runs WITHOUT QC cross-attention (GPUs 2-3)
@@ -110,16 +110,16 @@ CUDA_VISIBLE_DEVICES=2 state tx train \
   ${SHARED_ARGS} \
   model.kwargs.use_qc_cross_attn=false \
   training.lr=1e-4 \
-  wandb.tags='["'"${RUN_ID}"'", "baseline", "lr1e-4"]' \
-  output_dir="results/${RUN_ID}/baseline_lr1e-4" \
-  name="baseline_${RUN_ID}_lr1e-4" &
+  wandb.tags='["'"${RUN_ID}"'", "Tian", "baseline", "lr1e-4"]' \
+  output_dir="results/${RUN_ID}/baseline_Tian_lr1e-4" \
+  name="baseline_Tian_${RUN_ID}_lr1e-4" &
 
 CUDA_VISIBLE_DEVICES=3 state tx train \
   ${SHARED_ARGS} \
   model.kwargs.use_qc_cross_attn=false \
   training.lr=1e-5 \
-  wandb.tags='["'"${RUN_ID}"'", "baseline", "lr1e-5"]' \
-  output_dir="results/${RUN_ID}/baseline_lr1e-5" \
-  name="baseline_${RUN_ID}_lr1e-5" &
+  wandb.tags='["'"${RUN_ID}"'", "Tian", "baseline", "lr1e-5"]' \
+  output_dir="results/${RUN_ID}/baseline_Tian_lr1e-5" \
+  name="baseline_Tian_${RUN_ID}_lr1e-5" &
 
 wait

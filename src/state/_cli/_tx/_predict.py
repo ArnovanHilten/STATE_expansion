@@ -784,6 +784,13 @@ def run_tx_predict(args: ap.ArgumentParser):
         # adata_real = anndata.AnnData(X=final_reals, obs=obs, var=var)
         adata_real = anndata.AnnData(X=final_reals, obs=obs)
 
+    # Compute results_dir early so it is available for the attention weights save below.
+    _ckpt_tag = ("eval_train_" if args.eval_train_data else "eval_") + os.path.basename(args.checkpoint)
+    if args.ablate_source is not None:
+        _ckpt_tag = f"ablate_source_{args.ablate_source}/" + _ckpt_tag
+    results_dir = os.path.join(args.output_dir, _ckpt_tag)
+    os.makedirs(results_dir, exist_ok=True)
+
     # Save QC cross-attention weights into obsm and as a standalone npz (only when --save-attn-weights).
     if final_qc_attn_weights is not None:
         adata_pred.obsm["qc_attn_weights"] = final_qc_attn_weights
@@ -841,11 +848,6 @@ def run_tx_predict(args: ap.ArgumentParser):
             )
 
     # Save the AnnData objects
-    _ckpt_tag = ("eval_train_" if args.eval_train_data else "eval_") + os.path.basename(args.checkpoint)
-    if args.ablate_source is not None:
-        _ckpt_tag = f"ablate_source_{args.ablate_source}/" + _ckpt_tag
-    results_dir = os.path.join(args.output_dir, _ckpt_tag)
-    os.makedirs(results_dir, exist_ok=True)
     adata_pred_path = os.path.join(results_dir, "adata_pred.h5ad")
     adata_real_path = os.path.join(results_dir, "adata_real.h5ad")
 
