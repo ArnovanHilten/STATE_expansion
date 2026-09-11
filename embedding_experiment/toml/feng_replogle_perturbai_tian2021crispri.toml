@@ -1,0 +1,51 @@
+# Train: feng2025, replogle, perturbai_wholebrain, tian2021_crispri.
+# Validate: a held-out slice of tian2021_crispri.ipsc_neuron's perturbations
+#   (fewshot val) -- zeroshot-holding-out the WHOLE cell type isn't an option
+#   here since tian2021_crispri only has this one cell_line; that would drop
+#   it from training entirely instead of just reserving part of it for val.
+# Test: tian2019, held out completely (zeroshot test on both its cell types).
+#   Confirmed against the real current gold on gefion (not a stale local
+#   mirror): both ipsc and neuron share the same real 8-gene panel
+#   (PPP2R1A, MMAB, HMGCS1, PMVK, HMGCR, SEPSECS, KIF1A, TARS2) plus
+#   non-targeting controls, and both already have obsm['X_state'] and
+#   obs['qc_tier'] populated -- so embed_key=X_state is satisfied for this
+#   dataset at least.
+#
+# Paths point at ppseq's own gold output (PPSEQ_DATA_ROOT=
+# /dcai/projects01/cu_0055/data/perturbseq) -- NOT the older
+# /dcai/projects/cu_0055/data/perturbseq/gold/filtered/... path used by
+# SE_R_Rk562.toml in this same directory. Confirm this is the intended
+# source before relying on it.
+
+[datasets]
+feng2025 = "/dcai/projects01/cu_0055/data/perturbseq/gold/feng2025"
+replogle = "/dcai/projects01/cu_0055/data/perturbseq/gold/replogle"
+perturbai_wholebrain = "/dcai/projects01/cu_0055/data/perturbseq/gold/perturbai_wholebrain"
+tian2021_crispri = "/dcai/projects01/cu_0055/data/perturbseq/gold/tian2021_crispri"
+tian2019 = "/dcai/projects01/cu_0055/data/perturbseq/gold/tian2019"
+
+# Training specifications
+# All cell types in a dataset automatically go into training (excluding zeroshot/fewshot overrides)
+[training]
+feng2025 = "train"
+replogle = "train"
+perturbai_wholebrain = "train"
+tian2021_crispri = "train"
+tian2019 = "train"
+
+# Zeroshot specifications - entire cell types go to val or test
+[zeroshot]
+"tian2019.ipsc" = "test"
+"tian2019.neuron" = "test"
+
+# Fewshot specifications - explicit perturbation lists
+# tian2021_crispri.ipsc_neuron has 5 real perturbed genes total, confirmed
+# against the real current gold on gefion (not the stale local mirror
+# that produced the earlier CDH11/6-gene guess -- CDH11 doesn't actually
+# exist in this file): PON2 (206 cells), COX10 (190), CASP3 (187),
+# CALB1 (145), PVR (133), + 434 non-targeting controls. Holding out 2 of 5
+# (~323/1295 cells, ~25%) for val -- arbitrary but fixed pick, not by any
+# biological criterion. Adjust freely.
+[fewshot]
+[fewshot."tian2021_crispri.ipsc_neuron"]
+val = ["COX10", "PVR"]
