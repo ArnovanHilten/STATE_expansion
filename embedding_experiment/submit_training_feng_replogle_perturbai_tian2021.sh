@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=150
 #SBATCH --account=cu_0055
-#SBATCH --gres=gpu:8
+#SBATCH --gres=gpu:4
 #SBATCH --time=96:00:00
 #SBATCH --mem=1800GB
 #SBATCH --output=feng_replogle_tian_log_%j.log
@@ -12,9 +12,8 @@
 #
 # 2x2 sweep, same shape as submit_training.sh/submit_training_neurons.sh in
 # this directory: dataset composition (perturbai_wholebrain in vs. out) x
-# learning rate (1e-4 vs 1e-5) = 4 runs, 2 GPUs each (all 8 requested GPUs
-# used, unlike the 4x1-GPU example -- this corpus is bigger than a single
-# dataset, so 1 GPU/run isn't enough to be worth doing 4-way at all).
+# learning rate (1e-4 vs 1e-5) = 4 runs, 1 GPU each -- same 4x1-GPU pattern
+# as the Tian example (this model fits on a single GPU).
 #
 # Both TOMLs share the same train/val/test design (see either file's own
 # header comment): train on feng2025 + replogle + tian2021 (+ optionally
@@ -74,7 +73,6 @@ SHARED_ARGS="
   data.kwargs.pert_col=gene
   data.kwargs.cell_type_key=cell_line
   data.kwargs.control_pert=non-targeting
-  experiment.num_gpus_per_node=2
   training.max_steps=200000
   training.ckpt_every_n_steps=2000
   training.batch_size=${BATCHSIZE}
@@ -90,10 +88,10 @@ SHARED_ARGS="
 "
 
 # =========================
-# Runs WITH perturbai_wholebrain (GPUs 0-1, 2-3, LR sweep)
+# Runs WITH perturbai_wholebrain (GPUs 0, 1, LR sweep)
 # =========================
 
-CUDA_VISIBLE_DEVICES=0,1 state tx train \
+CUDA_VISIBLE_DEVICES=0 state tx train \
   ${SHARED_ARGS} \
   data.kwargs.toml_config_path="${TOML_WITH_PERTURBAI}" \
   training.lr=1e-4 \
@@ -101,7 +99,7 @@ CUDA_VISIBLE_DEVICES=0,1 state tx train \
   output_dir="results/${RUN_ID}/with_perturbai_lr1e-4" \
   name="with_perturbai_${RUN_ID}_lr1e-4" &
 
-CUDA_VISIBLE_DEVICES=2,3 state tx train \
+CUDA_VISIBLE_DEVICES=1 state tx train \
   ${SHARED_ARGS} \
   data.kwargs.toml_config_path="${TOML_WITH_PERTURBAI}" \
   training.lr=1e-5 \
@@ -110,10 +108,10 @@ CUDA_VISIBLE_DEVICES=2,3 state tx train \
   name="with_perturbai_${RUN_ID}_lr1e-5" &
 
 # =========================
-# Baseline runs WITHOUT perturbai_wholebrain (GPUs 4-5, 6-7, LR sweep)
+# Baseline runs WITHOUT perturbai_wholebrain (GPUs 2, 3, LR sweep)
 # =========================
 
-CUDA_VISIBLE_DEVICES=4,5 state tx train \
+CUDA_VISIBLE_DEVICES=2 state tx train \
   ${SHARED_ARGS} \
   data.kwargs.toml_config_path="${TOML_BASELINE}" \
   training.lr=1e-4 \
@@ -121,7 +119,7 @@ CUDA_VISIBLE_DEVICES=4,5 state tx train \
   output_dir="results/${RUN_ID}/baseline_lr1e-4" \
   name="baseline_${RUN_ID}_lr1e-4" &
 
-CUDA_VISIBLE_DEVICES=6,7 state tx train \
+CUDA_VISIBLE_DEVICES=3 state tx train \
   ${SHARED_ARGS} \
   data.kwargs.toml_config_path="${TOML_BASELINE}" \
   training.lr=1e-5 \
