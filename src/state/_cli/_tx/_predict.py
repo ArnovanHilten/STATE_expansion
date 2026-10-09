@@ -103,6 +103,23 @@ def add_arguments_predict(parser: ap.ArgumentParser):
         ),
     )
 
+    parser.add_argument(
+        "--half-split",
+        action="store_true",
+        help=(
+            "With --pseudobulk: split the cells of each (context, perturbation) in two, and score predictions "
+            "against the ground-truth half only. Use the same --half-split-seed for every model and baseline so "
+            "they share one ground truth. Always on for the interp_duplicate baseline."
+        ),
+    )
+
+    parser.add_argument(
+        "--half-split-seed",
+        type=int,
+        default=0,
+        help="Seed for the --half-split cell assignment.",
+    )
+
 
 def run_tx_predict(args: ap.ArgumentParser):
     import logging
@@ -116,6 +133,8 @@ def run_tx_predict(args: ap.ArgumentParser):
     from scipy import sparse as sp
     import torch
     import yaml
+
+    from ...tx.models.interp_duplicate import HalfSplitter, apply_interpolated_duplicate
 
     # Cell-eval for metrics computation
     from cell_eval import MetricsEvaluator
@@ -297,6 +316,10 @@ def run_tx_predict(args: ap.ArgumentParser):
         from ...tx.models.context_mean import ContextMeanPerturbationModel
 
         ModelClass = ContextMeanPerturbationModel
+    elif model_class_name.lower() == "interp_duplicate":
+        from ...tx.models.interp_duplicate import InterpDuplicatePerturbationModel
+
+        ModelClass = InterpDuplicatePerturbationModel
     elif model_class_name.lower() == "decoder_only":
         from ...tx.models.decoder_only import DecoderOnlyPerturbationModel
 
@@ -376,6 +399,9 @@ def run_tx_predict(args: ap.ArgumentParser):
         and cfg["data"]["kwargs"]["output_space"] == "gene"
     ) or (data_module.embed_key is not None and cfg["data"]["kwargs"]["output_space"] == "all")
 
+    if not args.pseudobulk and (args.half_split or getattr(model, "is_interp_duplicate", False)):
+        raise ValueError("--half-split and the interp_duplicate baseline require --pseudobulk.")
+
     if args.pseudobulk:
         logger.info("Pseudobulk enabled; aggregating running means by (context, perturbation).")
 
@@ -393,6 +419,17 @@ def run_tx_predict(args: ap.ArgumentParser):
                 pseudo_x_dim = gene_dim
             else:
                 raise ValueError(f"Unsupported output_space for pseudobulk: {cfg['data']['kwargs']['output_space']}")
+
+        is_interp_duplicate = bool(getattr(model, "is_interp_duplicate", False))
+        use_half_split = args.half_split or is_interp_duplicate
+        if is_interp_duplicate and store_raw_expression:
+            raise ValueError(
+                "interp_duplicate needs predictions and ground truth in the same space; use data.kwargs.embed_key "
+                "null or X_hvg (like the perturb_mean/context_mean baselines)."
+            )
+        splitter = HalfSplitter(args.half_split_seed) if use_half_split else None
+        if use_half_split:
+            logger.info("Half-split enabled (seed=%d): scoring against the ground-truth half only.", args.half_split_seed)
 
         pb_groups: dict[tuple[str, str], dict] = {}
         context_mode = None
@@ -450,8 +487,12 @@ def run_tx_predict(args: ap.ArgumentParser):
                     group_to_indices.setdefault(key, []).append(idx)
 
                 for (context_label, pert_name), idxs in group_to_indices.items():
-                    idx_arr = np.asarray(idxs, dtype=np.int64)
-                    first_idx = int(idx_arr[0])
+                    all_idx = np.asarray(idxs, dtype=np.int64)
+                    idx_arr, td_idx = all_idx, None
+                    if use_half_split:
+                        td_mask = splitter.assign((context_label, pert_name), all_idx.size)
+                        idx_arr, td_idx = all_idx[~td_mask], all_idx[td_mask]
+                    first_idx = int(all_idx[0])
                     current_celltype = celltypes[first_idx]
                     current_batch = str(batch_labels[first_idx])
 
@@ -470,6 +511,11 @@ def run_tx_predict(args: ap.ArgumentParser):
                                 np.zeros(pseudo_x_dim, dtype=np.float64) if store_raw_expression else None
                             ),
                         }
+                        if is_interp_duplicate:
+                            for k in ("td_sum", "td_sumsq", "all_sum", "all_sumsq"):
+                                entry[k] = np.zeros(output_dim, dtype=np.float64)
+                            entry["td_n"] = 0
+                            entry["all_n"] = 0
                         pb_groups[(context_label, pert_name)] = entry
                     elif entry["celltype_name"] != current_celltype:
                         raise ValueError(
@@ -483,6 +529,27 @@ def run_tx_predict(args: ap.ArgumentParser):
                     if store_raw_expression:
                         entry["x_hvg_sum"] += batch_real_gene_np[idx_arr].sum(axis=0, dtype=np.float64)
                         entry["counts_pred_sum"] += batch_gene_pred_np[idx_arr].sum(axis=0, dtype=np.float64)
+                    if is_interp_duplicate:
+                        all_real = batch_real_np[all_idx].astype(np.float64)
+                        td_real = batch_real_np[td_idx].astype(np.float64)
+                        entry["all_sum"] += all_real.sum(axis=0)
+                        entry["all_sumsq"] += (all_real**2).sum(axis=0)
+                        entry["all_n"] += int(all_idx.size)
+                        entry["td_sum"] += td_real.sum(axis=0)
+                        entry["td_sumsq"] += (td_real**2).sum(axis=0)
+                        entry["td_n"] += int(td_idx.size)
+
+        if use_half_split:
+            # Groups with no ground-truth cells (e.g. a single cell landed in the duplicate half) cannot be scored.
+            n_before = len(pb_groups)
+            pb_groups = {k: v for k, v in pb_groups.items() if v["count"] > 0}
+            if len(pb_groups) < n_before:
+                logger.warning(
+                    "Half-split: dropped %d/%d groups with no ground-truth cells.", n_before - len(pb_groups), n_before
+                )
+        if is_interp_duplicate:
+            apply_interpolated_duplicate(list(pb_groups.values()), data_module.get_control_pert())
+            logger.info("Built interpolated-duplicate predictions for %d groups.", len(pb_groups))
 
         if len(pb_groups) == 0:
             logger.warning("No pseudobulk groups were generated. Exiting.")

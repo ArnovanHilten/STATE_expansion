@@ -277,7 +277,7 @@ def run_tx_train(cfg: DictConfig):
 
     model_name_lower = cfg["model"]["name"].lower()
     effective_max_steps = cfg["training"]["max_steps"]
-    if model_name_lower in {"perturb_mean", "context_mean"}:
+    if model_name_lower in {"perturb_mean", "context_mean", "interp_duplicate"}:
         # Mean baselines do not require long training loops; force a short run.
         effective_max_steps = 1
         logger.info(f"Overriding max_steps to {effective_max_steps} for model={model_name_lower}")
